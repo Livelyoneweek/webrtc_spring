@@ -12,45 +12,27 @@
     ></script>
 </head>
 <body>
-<div style="width: 600px; margin: auto; text-align: center; padding-top: 50px;">
-    <h2>🧑 WebRTC P2P 테스트</h2>
-    <input type="text" id="username" placeholder="닉네임" />
-    <button onclick="connect()">연결</button>
+<div style="width: 800px; margin: auto; text-align: center; padding-top: 30px;">
+    <h2>🧑 WebRTC P2P 그룹 화상 채팅</h2>
 
-    <div id="log" style="margin-top: 20px;"></div>
+    <div style="margin-bottom: 20px;">
+        <input type="text" id="username" placeholder="닉네임" style="width: 200px;" />
+        <button onclick="connect()">연결</button>
+    </div>
+
+    <!-- 내 영상 -->
+    <div style="margin-bottom: 20px;">
+        <div>📸 내 화면</div>
+        <video id="localVideo" autoplay muted playsinline style="width: 300px; border: 1px solid #ccc;"></video>
+    </div>
+
+    <!-- 상대방 영상들 -->
+    <div id="remoteVideos" style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; justify-items: center;">
+        <!-- 동적으로 video 태그가 추가될 예정 -->
+    </div>
+
+    <div id="log" style="margin-top: 20px; text-align: left;"></div>
 </div>
-
-<script>
-    let stompClient = null;
-
-    function connect() {
-        const socket = new SockJS("http://localhost:16100/ws");
-        stompClient = Stomp.over(socket);
-
-        stompClient.connect({}, function () {
-            log("✅ 연결됨");
-
-            stompClient.subscribe('/topic/message', function (message) {
-                log("📥 수신: " + message.body);
-            });
-
-            // 테스트용 메시지
-            stompClient.send("/app/message", {}, JSON.stringify({
-                type: "offer",
-                sender: "userA",
-                roomId: "room1",
-                target: "userB",
-                data: {
-                    sdp: "테스트 SDP 메시지입니다"
-                }
-            }));
-        });
-    }
-
-    function log(msg) {
-        const logDiv = document.getElementById("log");
-        logDiv.innerHTML += `<div>${msg}</div>`;
-    }
-</script>
+<script src="/js/socket.js" defer></script>
 </body>
 </html>

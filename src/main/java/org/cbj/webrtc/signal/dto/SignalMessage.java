@@ -3,10 +3,12 @@ package org.cbj.webrtc.signal.dto;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
+import lombok.ToString;
 
 @Getter
 @AllArgsConstructor
 @NoArgsConstructor
+@ToString
 public class SignalMessage {
     private String type;       // offer, answer, candidate, join, leave 등
     private String sender;     // 보내는 사람 닉네임
