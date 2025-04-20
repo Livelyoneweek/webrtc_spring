@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <title>WebRTC P2P 데모</title>
+    <script
+            type="text/javascript"
+            src="https://cdn.jsdelivr.net/npm/sockjs-client/dist/sockjs.min.js"
+    ></script>
+    <script
+            type="text/javascript"
+            src="https://cdn.jsdelivr.net/npm/stompjs/lib/stomp.min.js"
+    ></script>
+</head>
+<body>
+<div style="width: 600px; margin: auto; text-align: center; padding-top: 50px;">
+    <h2>🧑 WebRTC P2P 테스트</h2>
+    <input type="text" id="username" placeholder="닉네임" />
+    <button onclick="connect()">연결</button>
+
+    <div id="log" style="margin-top: 20px;"></div>
+</div>
+
+<script>
+    let stompClient = null;
+
+    function connect() {
+        const socket = new SockJS("http://localhost:16100/ws");
+        stompClient = Stomp.over(socket);
+
+        stompClient.connect({}, function () {
+            log("✅ 연결됨");
+
+            stompClient.subscribe('/topic/message', function (message) {
+                log("📥 수신: " + message.body);
+            });
+
+            // 테스트용 메시지
+            stompClient.send("/app/message", {}, JSON.stringify({
+                type: "offer",
+                sender: "userA",
+                roomId: "room1",
+                target: "userB",
+                data: {
+                    sdp: "테스트 SDP 메시지입니다"
+                }
+            }));
+        });
+    }
+
+    function log(msg) {
+        const logDiv = document.getElementById("log");
+        logDiv.innerHTML += `<div>${msg}</div>`;
+    }
+</script>
+</body>
+</html>
