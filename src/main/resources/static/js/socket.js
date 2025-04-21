@@ -3,6 +3,8 @@ let localStream = null;
 let peerConnections = {}; // 유저별 peer 연결
 let username = "";
 const candidateQueue = {}; // sender → candidate 배열
+const offerQueue = [];
+let isProcessingOffer = false;
 
 const configuration = {
     iceServers: [
@@ -13,6 +15,7 @@ const configuration = {
 window.connect = connect;
 
 function connect() {
+    log(`▶️ connect start`);
     username = document.getElementById("username").value.trim();
     if (!username) {
         alert("닉네임을 입력해주세요");
@@ -36,6 +39,7 @@ function connect() {
 }
 
 async function startMedia() {
+    log(`▶️ startMedia start`);
     localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
     document.getElementById("localVideo").srcObject = localStream;
 
@@ -66,6 +70,7 @@ function handleSignal(msg) {
 }
 
 function handleNewUser(data = {}) {
+    log(`▶️ handleNewUser start`);
     const { users = [], offers = [] } = data;
 
     // 새로운 연결만 설정
@@ -77,6 +82,7 @@ function handleNewUser(data = {}) {
 }
 
 function handleUserLeft(data = {}) {
+    log(`▶️ handleUserLeft start`);
     const { users = [] } = data;
 
     // 연결되지 않은 유저의 peerConnections 정리
@@ -95,6 +101,7 @@ function handleUserLeft(data = {}) {
 
 
 function createPeerConnection(target) {
+    log(`▶️ createPeerConnection start`);
     if (peerConnections[target]) return;
 
     const pc = new RTCPeerConnection(configuration);
@@ -133,6 +140,7 @@ function createPeerConnection(target) {
 }
 
 function createOfferTo(target) {
+    log(`▶️ createOfferTo start`);
     if (peerConnections[target]) {
         const pc = peerConnections[target];
         if (pc.signalingState === "stable") {
@@ -160,31 +168,59 @@ function createOfferTo(target) {
 }
 
 async function receiveOffer(msg) {
-    createPeerConnection(msg.sender);
-    const pc = peerConnections[msg.sender];
+    log(`▶️ receiveOffer start`);
+    offerQueue.push(msg); // 일단 큐에 쌓음
+    processOfferQueue();
+}
 
-    await pc.setRemoteDescription(new RTCSessionDescription(msg.data));
+async function processOfferQueue() {
+    log(`▶️ processOfferQueue start`);
+    if (isProcessingOffer || offerQueue.length === 0) return;
 
-    // 💡 candidate 큐 처리
-    if (candidateQueue[msg.sender]) {
-        for (const cand of candidateQueue[msg.sender]) {
-            await pc.addIceCandidate(new RTCIceCandidate(cand));
+    const msg = offerQueue.shift(); // 큐에서 꺼냄
+    isProcessingOffer = true;
+
+    try {
+        createPeerConnection(msg.sender);
+        const pc = peerConnections[msg.sender];
+
+        if (pc.signalingState !== "stable") {
+            log(`⚠️ offer 수신 거부 (signalingState=${pc.signalingState})`);
+            return;
         }
-        candidateQueue[msg.sender] = [];
+
+        await pc.setRemoteDescription(new RTCSessionDescription(msg.data));
+
+        // candidate 큐 처리
+        if (candidateQueue[msg.sender]) {
+            for (const cand of candidateQueue[msg.sender]) {
+                await pc.addIceCandidate(new RTCIceCandidate(cand));
+            }
+            candidateQueue[msg.sender] = [];
+        }
+
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+
+        sendMessage({
+            type: "answer",
+            sender: username,
+            target: msg.sender,
+            data: answer
+        });
+
+        log(`✅ offer → answer 처리 완료: ${msg.sender}`);
+    } catch (e) {
+        log(`❌ offer 처리 중 에러: ${e.message}`);
+    } finally {
+        isProcessingOffer = false;
+        // 다음 offer 처리
+        setTimeout(processOfferQueue, 0);
     }
-
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-
-    sendMessage({
-        type: "answer",
-        sender: username,
-        target: msg.sender,
-        data: answer
-    });
 }
 
 async function receiveAnswer(msg) {
+    log(`▶️ receiveAnswer start`);
     const sender = msg.sender;
     const pc = peerConnections[sender];
     if (!pc) {
@@ -214,6 +250,7 @@ async function receiveAnswer(msg) {
 
 
 async function receiveCandidate(msg) {
+    log(`▶️ receiveCandidate start`);
     const sender = msg.sender;
     const pc = peerConnections[sender];
 
@@ -241,10 +278,12 @@ async function receiveCandidate(msg) {
     }
 }
 function sendMessage(payload) {
+    log(`▶️ sendMessage start`);
     stompClient.send("/app/message", {}, JSON.stringify(payload));
 }
 
 function setRemoteStream(id, stream) {
+    log(`▶️ setRemoteStream start`);
     const videoId = `remote-${id}`;
     const container = document.getElementById("remoteVideos");
 
