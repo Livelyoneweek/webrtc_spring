@@ -212,7 +212,7 @@ async function receiveAnswer(msg) {
     }
 }
 
-Copy
+
 async function receiveCandidate(msg) {
     const sender = msg.sender;
     const pc = peerConnections[sender];
