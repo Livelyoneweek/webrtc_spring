@@ -9,16 +9,51 @@ import org.springframework.messaging.handler.annotation.SendTo;
 import org.springframework.messaging.simp.SimpMessageHeaderAccessor;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+
 @Slf4j
 @RestController
 @RequiredArgsConstructor
 public class SignalingController {
 
-    // 클라이언트 → /app/signal 로 메시지 보내면
+    private final Set<String> activeUsers = ConcurrentHashMap.newKeySet();
+
     @MessageMapping("/message")
     @SendTo("/topic/message")
     public SignalMessage signaling(@Payload SignalMessage message, SimpMessageHeaderAccessor headerAccessor) {
-        log.info("📡 signal received: {}", message);
+        if ("join".equals(message.getType())) {
+            String newUser = message.getSender();
+            if (activeUsers.add(newUser)) {
+                List<String> sortedUsers = new ArrayList<>(activeUsers);
+                Collections.sort(sortedUsers);
+                List<List<String>> offers = new ArrayList<>();
+                for (String existingUser : sortedUsers) {
+                    if (!existingUser.equals(newUser)) {
+                        offers.add(List.of(existingUser, newUser));
+                    }
+                }
+                Map<String, Object> resetData = new HashMap<>();
+                resetData.put("users", sortedUsers);
+                resetData.put("offers", offers);
+                return new SignalMessage("new_user", "server", null, null, resetData);
+            }
+        } else if ("leave".equals(message.getType())) {
+            String leavingUser = message.getSender();
+            if (activeUsers.remove(leavingUser)) {
+                List<String> sortedUsers = new ArrayList<>(activeUsers);
+                Collections.sort(sortedUsers);
+
+                log.info("✅ User left - users: {}", sortedUsers);
+
+                Map<String, Object> resetData = new HashMap<>();
+                resetData.put("users", sortedUsers);
+                resetData.put("offers", Collections.emptyList());
+
+                return new SignalMessage("user_left", "server", null, null, resetData);
+            }
+        }
+
         return message;
     }
 }
