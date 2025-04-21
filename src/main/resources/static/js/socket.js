@@ -1,312 +1,211 @@
-let stompClient = null;
-let localStream = null;
-let peerConnections = {}; // 유저별 peer 연결
+let stompClient;
+let localStream;
+const pcs = {};       // { peerName: RTCPeerConnection }
+const iceQueues = {}; // { peerName: [RTCIceCandidateInit, …] }
 let username = "";
-const candidateQueue = {}; // sender → candidate 배열
-const offerQueue = [];
-let isProcessingOffer = false;
 
-const configuration = {
-    iceServers: [
-        { urls: "stun:stun.l.google.com:19302" }
-    ]
+const config = {
+    iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
 };
 
 window.connect = connect;
 
-function connect() {
-    log(`▶️ connect start`);
+/**
+ * 1. 페이지에서 “연결” 버튼 클릭 시 호출
+ *    - 사용자 미디어 획득
+ *    - STOMP/SockJS 연결 및 join 신호 전송
+ */
+async function connect() {
     username = document.getElementById("username").value.trim();
     if (!username) {
-        alert("닉네임을 입력해주세요");
-        return;
+        return alert("닉네임을 입력해주세요");
     }
 
-    const socket = new SockJS("/ws");
-    stompClient = Stomp.over(socket);
+    try {
+        // 내 카메라·마이크 스트림 얻기
+        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        document.getElementById("localVideo").srcObject = localStream;
+    } catch (err) {
+        return console.error("getUserMedia 실패:", err);
+    }
 
+    // SockJS + STOMP로 시그널링 서버 연결
+    stompClient = Stomp.over(new SockJS("/ws"));
     stompClient.connect({}, () => {
-        log(`✅ ${username} WebSocket 연결됨`);
-
-        stompClient.subscribe("/topic/message", (message) => {
-            const msg = JSON.parse(message.body);
-            if (msg.sender === username) return; // 내 메시지는 무시
+        console.log("[connect] STOMP 연결 성공, join 전송");
+        // 메시지 구독
+        stompClient.subscribe("/topic/message", ({ body }) => {
+            const msg = JSON.parse(body);
+            if (msg.sender === username) return;
             handleSignal(msg);
         });
-
-        startMedia();
+        // 서버에 join 요청
+        stompClient.send("/app/message", {}, JSON.stringify({
+            type: "join",
+            sender: username
+        }));
     });
 }
 
-async function startMedia() {
-    log(`▶️ startMedia start`);
-    localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-    document.getElementById("localVideo").srcObject = localStream;
+/**
+ * 2. 서버로부터 들어오는 모든 시그널링 메시지 처리
+ */
+async function handleSignal(msg) {
+    const { type, sender, target, data } = msg;
 
-    // ✅ 입장 알림
-    sendMessage({ type: "join", sender: username });
-}
-
-function handleSignal(msg) {
-    switch (msg.type) {
-        case "new_user":
-            handleNewUser(msg.data); // 새로운 유저 처리
-            break;
-        case "user_left":
-            handleUserLeft(msg.data); // 유저 퇴장 처리
-            break;
-        case "offer":
-            receiveOffer(msg);
-            break;
-        case "answer":
-            receiveAnswer(msg);
-            break;
-        case "candidate":
-            receiveCandidate(msg);
-            break;
-        case "join":
-            break; // 무시
-    }
-}
-
-function handleNewUser(data = {}) {
-    log(`▶️ handleNewUser start`);
-    const { users = [], offers = [] } = data;
-
-    // 새로운 연결만 설정
-    const myTargets = offers
-        .filter(([from, to]) => from === username)
-        .map(([_, to]) => to);
-
-    myTargets.forEach(target => createOfferTo(target));
-}
-
-function handleUserLeft(data = {}) {
-    log(`▶️ handleUserLeft start`);
-    const { users = [] } = data;
-
-    // 연결되지 않은 유저의 peerConnections 정리
-    Object.keys(peerConnections).forEach(user => {
-        if (!users.includes(user)) {
-            try {
-                peerConnections[user]?.close();
-                delete peerConnections[user];
-                const videoEl = document.getElementById(`remote-${user}`);
-                if (videoEl) videoEl.remove();
-                log(`🧹 ${user} 연결 정리`);
-            } catch (e) {}
-        }
-    });
-}
-
-
-function createPeerConnection(target) {
-    log(`▶️ createPeerConnection start`);
-    if (peerConnections[target]) return;
-
-    const pc = new RTCPeerConnection(configuration);
-
-    pc.onicecandidate = (event) => {
-        if (event.candidate) {
-            sendMessage({
-                type: "candidate",
-                sender: username,
-                target,
-                data: event.candidate
-            });
-        }
-    };
-
-    // pc.ontrack = (event) => {
-    //     log(`🎥 ${target}의 영상 수신됨`);
-    //     setRemoteStream(target, event.streams[0]);
-    // };
-    pc.ontrack = (event) => {
-        const id = target;
-        const videoId = `remote-${id}`;
-        const videoEl = document.getElementById(videoId);
-
-        if (videoEl && videoEl.srcObject === event.streams[0]) {
-            return; // 같은 스트림이면 무시
-        }
-
-        log(`🎥 ${id}의 영상 수신됨`);
-        setRemoteStream(id, event.streams[0]);
-    };
-
-    localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
-
-    peerConnections[target] = pc;
-}
-
-function createOfferTo(target) {
-    log(`▶️ createOfferTo start`);
-    if (peerConnections[target]) {
-        const pc = peerConnections[target];
-        if (pc.signalingState === "stable") {
-            log(`⚠️ 이미 ${target}와 안정적인 연결 존재`);
-            return;
-        }
-        pc.close();
-        delete peerConnections[target];
-        log(`🧹 ${target} 기존 연결 정리`);
-    }
-
-    createPeerConnection(target);
-    const pc = peerConnections[target];
-    pc.createOffer()
-        .then(offer => pc.setLocalDescription(offer))
-        .then(() => {
-            sendMessage({
-                type: "offer",
-                sender: username,
-                target,
-                data: pc.localDescription
-            });
-        })
-        .catch(e => log(`❌ Offer 생성 실패: ${e.message}`));
-}
-
-async function receiveOffer(msg) {
-    log(`▶️ receiveOffer start`);
-    offerQueue.push(msg); // 일단 큐에 쌓음
-    processOfferQueue();
-}
-
-async function processOfferQueue() {
-    log(`▶️ processOfferQueue start`);
-    if (isProcessingOffer || offerQueue.length === 0) return;
-
-    const msg = offerQueue.shift(); // 큐에서 꺼냄
-    isProcessingOffer = true;
-
-    try {
-        createPeerConnection(msg.sender);
-        const pc = peerConnections[msg.sender];
-
-        if (pc.signalingState !== "stable") {
-            log(`⚠️ offer 수신 거부 (signalingState=${pc.signalingState})`);
-            return;
-        }
-
-        await pc.setRemoteDescription(new RTCSessionDescription(msg.data));
-
-        // candidate 큐 처리
-        if (candidateQueue[msg.sender]) {
-            for (const cand of candidateQueue[msg.sender]) {
-                await pc.addIceCandidate(new RTCIceCandidate(cand));
+    if (type === "new_user") {
+        // 새 유저 진입: 서버가 보낸 offers 배열을 보고 내가 offer 보낼 대상을 결정
+        console.log("[new_user] users:", data.users, "offers:", data.offers);
+        for (const [from, to] of data.offers) {
+            if (from === username) {
+                console.log(`[new_user] offer 생성 -> ${to}`);
+                await createOffer(to);
             }
-            candidateQueue[msg.sender] = [];
         }
 
+    } else if (type === "offer" && target === username) {
+        // Offer 수신 시 → Answer 생성
+        console.log(`[offer] from ${sender}`);
+        const pc = getPC(sender);
+
+        // 1) 원격 SDP 설정
+        await pc.setRemoteDescription(new RTCSessionDescription(data));
+        // 2) 큐에 쌓인 ICE 모두 추가
+        drainIce(sender);
+
+        // 3) Answer 생성 및 전송
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
-
-        sendMessage({
+        console.log(`[offer] answer 전송 -> ${sender}`);
+        stompClient.send("/app/message", {}, JSON.stringify({
             type: "answer",
             sender: username,
-            target: msg.sender,
-            data: answer
-        });
+            target: sender,
+            data: pc.localDescription
+        }));
 
-        log(`✅ offer → answer 처리 완료: ${msg.sender}`);
-    } catch (e) {
-        log(`❌ offer 처리 중 에러: ${e.message}`);
-    } finally {
-        isProcessingOffer = false;
-        // 다음 offer 처리
-        setTimeout(processOfferQueue, 0);
-    }
-}
+    } else if (type === "answer" && target === username) {
+        // Answer 수신 시 → 원격 SDP 설정
+        console.log(`[answer] from ${sender}`);
+        const pc = pcs[sender];
+        if (!pc) return console.warn("알 수 없는 answer from", sender);
+        await pc.setRemoteDescription(new RTCSessionDescription(data));
+        drainIce(sender);
 
-async function receiveAnswer(msg) {
-    log(`▶️ receiveAnswer start`);
-    const sender = msg.sender;
-    const pc = peerConnections[sender];
-    if (!pc) {
-        log(`⚠️ ${sender}에 대한 peerConnection 없음`);
-        return;
-    }
-
-    if (pc.signalingState !== "have-local-offer") {
-        log(`⛔ ${sender}와의 연결 상태가 have-local-offer가 아님: ${pc.signalingState}`);
-        return;
-    }
-
-    try {
-        await pc.setRemoteDescription(new RTCSessionDescription(msg.data));
-        log(`✅ answer 설정됨: ${sender}`);
-
-        if (candidateQueue[sender]) {
-            for (const cand of candidateQueue[sender]) {
-                await pc.addIceCandidate(new RTCIceCandidate(cand));
-            }
-            candidateQueue[sender] = [];
-        }
-    } catch (e) {
-        log(`⚠️ answer 설정 중 에러: ${e.message}`);
-    }
-}
-
-
-async function receiveCandidate(msg) {
-    log(`▶️ receiveCandidate start`);
-    const sender = msg.sender;
-    const pc = peerConnections[sender];
-
-    if (!pc) {
-        log(`⚠️ ${sender}에 대한 peerConnection 없음`);
-        return;
-    }
-
-    if (!pc.remoteDescription || pc.remoteDescription.type === "") {
-        if (!candidateQueue[sender]) candidateQueue[sender] = [];
-        if (candidateQueue[sender].length < 50) {
-            candidateQueue[sender].push(msg.data);
-            log(`📥 candidate 대기열 저장: ${sender}, 큐 크기: ${candidateQueue[sender].length}`);
+    } else if (type === "candidate" && target === username) {
+        // ICE candidate 수신 시 → 즉시 추가 or 큐잉
+        const pc = pcs[sender];
+        if (pc && pc.remoteDescription && pc.remoteDescription.type) {
+            console.log(`[candidate] 즉시 add -> ${sender}`);
+            await pc.addIceCandidate(new RTCIceCandidate(data));
         } else {
-            log(`⚠️ ${sender}의 candidate 큐가 가득 찼습니다`);
+            console.log(`[candidate] 큐잉 -> ${sender}`);
+            iceQueues[sender].push(data);
         }
-        return;
-    }
 
-    try {
-        await pc.addIceCandidate(new RTCIceCandidate(msg.data));
-        log(`✅ ICE candidate 추가됨: ${sender}`);
-    } catch (e) {
-        log(`❌ ICE candidate 추가 실패: ${e.message}`);
-    }
-}
-function sendMessage(payload) {
-    log(`▶️ sendMessage start`);
-    stompClient.send("/app/message", {}, JSON.stringify(payload));
-}
-
-function setRemoteStream(id, stream) {
-    log(`▶️ setRemoteStream start`);
-    const videoId = `remote-${id}`;
-    const container = document.getElementById("remoteVideos");
-
-    let videoEl = document.getElementById(videoId);
-    if (!videoEl) {
-        videoEl = document.createElement("video");
-        videoEl.id = videoId;
-        videoEl.autoplay = true;
-        videoEl.playsInline = true;
-        videoEl.style.width = "300px";
-        videoEl.style.border = "1px solid #ccc";
-        container.appendChild(videoEl);
-        log(`🖼️ ${id} 비디오 요소 생성`);
-    }
-
-    if (videoEl.srcObject !== stream) {
-        videoEl.srcObject = stream;
-        videoEl.play().catch(e => log(`❌ ${id} 비디오 재생 실패: ${e.message}`));
-        log(`✅ ${id} 스트림 바인딩 완료`);
+    } else if (type === "user_left") {
+        // 유저 퇴장 시 필요한 PeerConnection 정리
+        console.log("[user_left] 남은 유저:", msg.data.users);
+        Object.keys(pcs).forEach(peer => {
+            if (!msg.data.users.includes(peer)) {
+                cleanupPeer(peer);
+            }
+        });
     }
 }
 
-function log(msg) {
-    const logDiv = document.getElementById("log");
-    logDiv.innerHTML += `<div>${msg}</div>`;
+/**
+ * 3. Offer 생성 & 전송
+ * @param {string} peer - 대상 유저명
+ */
+async function createOffer(peer) {
+    const pc = getPC(peer);
+
+    // 1) Offer SDP 생성
+    const offer = await pc.createOffer();
+    // 2) 내 SDP 로컬 설정 → ICE 수집 시작
+    await pc.setLocalDescription(offer);
+
+    console.log(`[createOffer] offer 전송 -> ${peer}`);
+    // 3) STOMP로 전송
+    stompClient.send("/app/message", {}, JSON.stringify({
+        type: "offer",
+        sender: username,
+        target: peer,
+        data: pc.localDescription
+    }));
+}
+
+/**
+ * 4. 큐에 쌓인 ICE 후보자 모두 추가
+ * @param {string} peer - 대상 유저명
+ */
+function drainIce(peer) {
+    console.log(`[drainIce] ${peer} 후보자 추가:`, iceQueues[peer]);
+    const pc = pcs[peer];
+    iceQueues[peer].forEach(c => pc.addIceCandidate(new RTCIceCandidate(c)).catch(console.error));
+    iceQueues[peer] = [];
+}
+
+/**
+ * 5. RTCPeerConnection 생성 또는 기존 인스턴스 반환
+ * @param {string} peer - 대상 유저명
+ * @returns {RTCPeerConnection}
+ */
+function getPC(peer) {
+    if (pcs[peer]) return pcs[peer];
+
+    console.log(`[getPC] 새 PeerConnection 생성 for ${peer}`);
+    const pc = new RTCPeerConnection(config);
+    pcs[peer] = pc;
+    iceQueues[peer] = [];
+
+    // --- 이벤트 핸들러 등록 ---
+
+    // ICE 후보자 발견 시 호출
+    pc.onicecandidate = ({ candidate }) => {
+        if (candidate) {
+            console.log(`[onicecandidate] ${peer} -> 전송`);
+            stompClient.send("/app/message", {}, JSON.stringify({
+                type: "candidate",
+                sender: username,
+                target: peer,
+                data: candidate
+            }));
+        }
+    };
+
+    // 원격 트랙(stream) 수신 시 호출
+    pc.ontrack = ({ streams: [stream] }) => {
+        console.log(`[ontrack] 스트림 수신 for ${peer}`);
+        let vid = document.getElementById(`remote-${peer}`);
+        if (!vid) {
+            // 동적 <video> 엘리먼트 생성
+            vid = document.createElement("video");
+            vid.id = `remote-${peer}`;
+            vid.autoplay = true;
+            vid.playsInline = true;
+            vid.style.width = "300px";
+            vid.style.border = "1px solid #ccc";
+            document.getElementById("remoteVideos").appendChild(vid);
+        }
+        vid.srcObject = stream;
+    };
+
+    // 내 미디어 트랙을 페어 연결에 추가
+    localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+    return pc;
+}
+
+/**
+ * 6. PeerConnection 종료 및 엘리먼트 정리
+ * @param {string} peer - 대상 유저명
+ */
+function cleanupPeer(peer) {
+    console.log(`[cleanupPeer] ${peer} 연결 종료 및 정리`);
+    pcs[peer]?.close();
+    delete pcs[peer];
+    delete iceQueues[peer];
+    document.getElementById(`remote-${peer}`)?.remove();
 }

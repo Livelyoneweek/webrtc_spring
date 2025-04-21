@@ -22,6 +22,8 @@ public class SignalingController {
     @MessageMapping("/message")
     @SendTo("/topic/message")
     public SignalMessage signaling(@Payload SignalMessage message, SimpMessageHeaderAccessor headerAccessor) {
+        log.info("### SignalingController.signaling");
+
         if ("join".equals(message.getType())) {
             String newUser = message.getSender();
             if (activeUsers.add(newUser)) {
@@ -36,6 +38,8 @@ public class SignalingController {
                 Map<String, Object> resetData = new HashMap<>();
                 resetData.put("users", sortedUsers);
                 resetData.put("offers", offers);
+                log.info("### join users = {}",sortedUsers);
+                log.info("### join offers = {}",offers);
                 return new SignalMessage("new_user", "server", null, null, resetData);
             }
         } else if ("leave".equals(message.getType())) {
@@ -49,6 +53,7 @@ public class SignalingController {
                 Map<String, Object> resetData = new HashMap<>();
                 resetData.put("users", sortedUsers);
                 resetData.put("offers", Collections.emptyList());
+                log.info("### left users = {}",sortedUsers);
 
                 return new SignalMessage("user_left", "server", null, null, resetData);
             }
